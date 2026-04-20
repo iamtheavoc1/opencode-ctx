@@ -28,6 +28,16 @@
 //                               calls intact. Only targets per-turn GROWTH;
 //                               fresh sessions see no change.
 //
+//   5. tool.execute.after      - losslessly cleans every tool output at
+//                               write time: strips ANSI escapes, progress-bar
+//                               carriage returns, trailing whitespace, and
+//                               excessive blank-line runs. Fires BEFORE the
+//                               result persists in the transcript, so savings
+//                               compound on every turn thereafter. Applied
+//                               only to tools with free-form text output;
+//                               structured tools (task, todowrite, question,
+//                               call_omo_agent, skill, patch) are skipped.
+//
 // Kill switches:
 //   OPENCODE_CTX_PLUGIN=0             disable the whole plugin
 //   OPENCODE_CTX_TRIM=0               skip tool description + system prompt trim
@@ -38,6 +48,8 @@
 //   OPENCODE_CTX_MSGS_CAP=N           byte threshold for trimming (default 1000)
 //   OPENCODE_CTX_MSGS_HEAD=N          head bytes kept on trim (default 500)
 //   OPENCODE_CTX_MSGS_TAIL=N          tail bytes kept on trim (default 250)
+//   OPENCODE_CTX_SUPERSEDE=0          skip superseded-read collapse pass
+//   OPENCODE_CTX_CLEAN=0              skip tool-output ANSI/progress-bar clean
 //   OPENCODE_CTX_CAVEMAN=lite|full|ultra
 //                                     opt-in caveman output style (default off)
 //   OPENCODE_CTX_DEBUG=1              log decisions to stderr
@@ -60,14 +72,25 @@ import { compressOmoa } from "./omoa-trim"
 import { buildCavemanPrompt, parseCavemanLevel } from "./caveman-prompt"
 import { CUSTOM_COMPACTION_PROMPT } from "./compaction-prompt"
 import { trimMessageHistory } from "./messages-trim"
+import { cleanToolOutput } from "./tool-output-clean"
 
 const DISABLED = process.env.OPENCODE_CTX_PLUGIN === "0"
 const TRIM_ENABLED = process.env.OPENCODE_CTX_TRIM !== "0"
 const OMOA_ENABLED = process.env.OPENCODE_CTX_OMOA !== "0"
 const COMPACT_ENABLED = process.env.OPENCODE_CTX_COMPACT !== "0"
 const MSGS_ENABLED = process.env.OPENCODE_CTX_MSGS !== "0"
+const CLEAN_ENABLED = process.env.OPENCODE_CTX_CLEAN !== "0"
 const CAVEMAN_LEVEL = parseCavemanLevel(process.env.OPENCODE_CTX_CAVEMAN)
 const DEBUG = process.env.OPENCODE_CTX_DEBUG === "1"
+
+const CLEAN_SKIP_TOOLS = new Set([
+  "task",
+  "todowrite",
+  "question",
+  "call_omo_agent",
+  "skill",
+  "patch",
+])
 
 const log = (msg: string) => DEBUG && process.stderr.write(`[ctx-plugin] ${msg}\n`)
 
@@ -80,9 +103,9 @@ export const ContextPlugin: Plugin = async () => {
   log(
     `active: trim=${TRIM_ENABLED ? "on" : "off"} omoa=${OMOA_ENABLED ? "on" : "off"} compact=${
       COMPACT_ENABLED ? "on" : "off"
-    } msgs=${MSGS_ENABLED ? "on" : "off"} caveman=${CAVEMAN_LEVEL ?? "off"} overrides=${
-      Object.keys(TOOL_DESCRIPTION_OVERRIDES).length
-    }`,
+    } msgs=${MSGS_ENABLED ? "on" : "off"} clean=${CLEAN_ENABLED ? "on" : "off"} caveman=${
+      CAVEMAN_LEVEL ?? "off"
+    } overrides=${Object.keys(TOOL_DESCRIPTION_OVERRIDES).length}`,
   )
 
   const hooks: ReturnType<Plugin> extends Promise<infer H> ? H : never = {}
@@ -139,8 +162,42 @@ export const ContextPlugin: Plugin = async () => {
     hooks["experimental.chat.messages.transform"] = async (_input, output) => {
       if (!output.messages || output.messages.length === 0) return
       const result = trimMessageHistory(output.messages as unknown as Parameters<typeof trimMessageHistory>[0])
+      if (result.superseded > 0) {
+        log(`messages.transform: collapsed ${result.superseded} superseded reads, saved ${result.supersedeSaved}B`)
+      }
       if (result.trimmed > 0) {
         log(`messages.transform: ${result.before}B -> ${result.after}B across ${result.trimmed} old tool outputs`)
+      }
+    }
+  }
+
+  if (CLEAN_ENABLED) {
+    hooks["tool.execute.after"] = async (input, output) => {
+      if (CLEAN_SKIP_TOOLS.has(input.tool)) return
+      const anyOut = output as unknown as {
+        output?: unknown
+        content?: Array<{ type?: string; text?: string }>
+      }
+      if (typeof anyOut.output === "string") {
+        const before = anyOut.output.length
+        const cleaned = cleanToolOutput(anyOut.output)
+        if (cleaned.length !== before) {
+          anyOut.output = cleaned
+          log(`tool.execute.after ${input.tool}: ${before}B -> ${cleaned.length}B`)
+        }
+        return
+      }
+      if (Array.isArray(anyOut.content)) {
+        let before = 0
+        let after = 0
+        for (const item of anyOut.content) {
+          if (item?.type !== "text" || typeof item.text !== "string") continue
+          const cleaned = cleanToolOutput(item.text)
+          before += item.text.length
+          after += cleaned.length
+          if (cleaned.length !== item.text.length) item.text = cleaned
+        }
+        if (after !== before) log(`tool.execute.after ${input.tool} (mcp): ${before}B -> ${after}B`)
       }
     }
   }

@@ -4,13 +4,14 @@ Aggressive context compression plugin for [opencode](https://opencode.ai). Cuts 
 
 ## What it does
 
-Five independent, cache-deterministic transforms. Every transform is a pure function of its input, so Anthropic's prefix cache still hits on subsequent turns.
+Six independent, cache-deterministic transforms. Every transform is a pure function of its input, so Anthropic's prefix cache still hits on subsequent turns.
 
 | Hook | Target | Typical saving |
 |---|---|---|
 | `tool.definition` | Compresses 22 opencode + oh-my-openagent tool descriptions | ~13KB per request |
 | `experimental.chat.system.transform` | Replaces opencode's `anthropic.txt` and oh-my-openagent's Sisyphus prompt with equivalent compressed versions; dedupes the env/skills tail | ~14KB per request |
-| `experimental.chat.messages.transform` | Trims stale tool outputs (file reads, bash dumps, webfetches) in message history; preserves the last N intact | scales with session length, ~13K+ tokens/turn on long sessions |
+| `experimental.chat.messages.transform` | Two passes: (a) lossless superseded-read collapse — replaces reads of files that were later re-read or overwritten with a compact marker; (b) size-based trim of stale tool outputs; preserves the last N intact | scales with session length, ~13K+ tokens/turn on long sessions |
+| `tool.execute.after` | Lossless strip of ANSI escapes, progress-bar carriage returns, trailing whitespace, and blank-line runs from every tool output before it persists in the transcript | -30% avg on noisy outputs, -70%+ on progress-bar heavy commands; compounds every turn |
 | `experimental.session.compacting` | Supplies a denser compaction prompt for signal-rich summaries | on compaction events |
 | Caveman output mode (opt-in) | Optional system prompt append that constrains model output style | -62% on output tokens |
 
@@ -62,6 +63,8 @@ All env-var toggles. Default is plugin on, caveman off.
 | `OPENCODE_CTX_MSGS_CAP=N` | 600 | Byte threshold before trimming kicks in |
 | `OPENCODE_CTX_MSGS_HEAD=N` | 300 | Head bytes kept when trimming |
 | `OPENCODE_CTX_MSGS_TAIL=N` | 150 | Tail bytes kept when trimming |
+| `OPENCODE_CTX_SUPERSEDE=0` | on | Skip lossless superseded-read collapse |
+| `OPENCODE_CTX_CLEAN=0` | on | Skip lossless tool-output cleaner |
 | `OPENCODE_CTX_CAVEMAN=lite\|full\|ultra` | off | Opt-in caveman output style |
 | `OPENCODE_CTX_DEBUG=1` | off | Log decisions to stderr |
 | `OPENCODE_CTX_DUMP=<path>` | off | Dump `system[0]` to file on first fire (for debugging) |
@@ -94,10 +97,11 @@ Compression preserves:
 
 ```
 src/
-  index.ts              # Plugin entry, 4 hooks wired, kill-switch parsing
+  index.ts              # Plugin entry, 5 hooks wired, kill-switch parsing
   tool-overrides.ts     # 22 tool description overrides
   omoa-trim.ts          # oh-my-openagent Sisyphus compressor + tail dedupe
   messages-trim.ts      # Message history tool-output trim
+  tool-output-clean.ts  # Lossless ANSI/progress-bar cleaner
   system-trim.ts        # opencode anthropic.txt compressor
   compaction-prompt.ts  # Denser compaction prompt
   caveman-prompt.ts     # Opt-in output style compressor
