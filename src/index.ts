@@ -49,6 +49,8 @@
 //   OPENCODE_CTX_MSGS_HEAD=N          head bytes kept on trim (default 500)
 //   OPENCODE_CTX_MSGS_TAIL=N          tail bytes kept on trim (default 250)
 //   OPENCODE_CTX_SUPERSEDE=0          skip superseded-read collapse pass
+//   OPENCODE_CTX_DEDUP=0              skip duplicate tool-call collapse
+//   OPENCODE_CTX_DEDUP_MIN=N          min output bytes to consider for dedup (default 200)
 //   OPENCODE_CTX_CLEAN=0              skip tool-output ANSI/progress-bar clean
 //   OPENCODE_CTX_CAVEMAN=lite|full|ultra
 //                                     opt-in caveman output style (default off)
@@ -164,6 +166,9 @@ export const ContextPlugin: Plugin = async () => {
       const result = trimMessageHistory(output.messages as unknown as Parameters<typeof trimMessageHistory>[0])
       if (result.superseded > 0) {
         log(`messages.transform: collapsed ${result.superseded} superseded reads, saved ${result.supersedeSaved}B`)
+      }
+      if (result.deduped > 0) {
+        log(`messages.transform: deduped ${result.deduped} identical tool outputs, saved ${result.dedupSaved}B`)
       }
       if (result.trimmed > 0) {
         log(`messages.transform: ${result.before}B -> ${result.after}B across ${result.trimmed} old tool outputs`)

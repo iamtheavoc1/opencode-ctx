@@ -10,7 +10,7 @@ Six independent, cache-deterministic transforms. Every transform is a pure funct
 |---|---|---|
 | `tool.definition` | Compresses 22 opencode + oh-my-openagent tool descriptions | ~13KB per request |
 | `experimental.chat.system.transform` | Replaces opencode's `anthropic.txt` and oh-my-openagent's Sisyphus prompt with equivalent compressed versions; dedupes the env/skills tail | ~14KB per request |
-| `experimental.chat.messages.transform` | Two passes: (a) lossless superseded-read collapse — replaces reads of files that were later re-read or overwritten with a compact marker; (b) size-based trim of stale tool outputs; preserves the last N intact | scales with session length, ~13K+ tokens/turn on long sessions |
+| `experimental.chat.messages.transform` | Three passes: (a) lossless superseded-read collapse — replaces reads of files that were later re-read or overwritten; (b) lossless duplicate-call dedup — collapses older identical (tool, args, output) triples to a pointer; (c) size-based trim of remaining stale tool outputs; preserves the last N intact | scales with session length, ~13K+ tokens/turn on long sessions |
 | `tool.execute.after` | Lossless strip of ANSI escapes, progress-bar carriage returns, trailing whitespace, and blank-line runs from every tool output before it persists in the transcript | -30% avg on noisy outputs, -70%+ on progress-bar heavy commands; compounds every turn |
 | `experimental.session.compacting` | Supplies a denser compaction prompt for signal-rich summaries | on compaction events |
 | Caveman output mode (opt-in) | Optional system prompt append that constrains model output style | -62% on output tokens |
@@ -64,6 +64,8 @@ All env-var toggles. Default is plugin on, caveman off.
 | `OPENCODE_CTX_MSGS_HEAD=N` | 300 | Head bytes kept when trimming |
 | `OPENCODE_CTX_MSGS_TAIL=N` | 150 | Tail bytes kept when trimming |
 | `OPENCODE_CTX_SUPERSEDE=0` | on | Skip lossless superseded-read collapse |
+| `OPENCODE_CTX_DEDUP=0` | on | Skip lossless duplicate tool-call dedup |
+| `OPENCODE_CTX_DEDUP_MIN=N` | 200 | Min output bytes to consider for dedup |
 | `OPENCODE_CTX_CLEAN=0` | on | Skip lossless tool-output cleaner |
 | `OPENCODE_CTX_CAVEMAN=lite\|full\|ultra` | off | Opt-in caveman output style |
 | `OPENCODE_CTX_DEBUG=1` | off | Log decisions to stderr |
