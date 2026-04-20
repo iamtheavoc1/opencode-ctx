@@ -1,0 +1,35 @@
+{
+  "name": "opencode-ctx",
+  "version": "0.1.0",
+  "description": "Aggressive context compression plugin for opencode. Cuts Anthropic token usage ~40% on fresh sessions and ~52% on long sessions while preserving every behavioral rule and prefix-cache determinism.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iamtheavoc1/opencode-ctx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/iamtheavoc1/opencode-ctx/issues"
+  },
+  "homepage": "https://github.com/iamtheavoc1/opencode-ctx#readme",
+  "keywords": [
+    "opencode",
+    "plugin",
+    "anthropic",
+    "claude",
+    "context",
+    "compression",
+    "token-optimization"
+  ],
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
