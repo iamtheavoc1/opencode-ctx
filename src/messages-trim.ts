@@ -1,42 +1,3 @@
-// Trim stale tool outputs in message history before sending to LLM.
-//
-// Targets the biggest per-turn context growth: tool outputs from earlier turns
-// that accumulate in history and get re-sent every request. Deterministic by
-// design - same input produces same output - so Anthropic's prefix cache still
-// hits on subsequent turns.
-//
-// Three passes applied in order:
-//
-// 1. Superseded-read collapse (lossless):
-//    - A `read` of file X is superseded when a later `read` of X exists
-//      (newer snapshot available) OR a later `write` of X exists (file was
-//      fully replaced). In both cases the old read's output is definitionally
-//      stale. Replaced with a compact `[ctx-plugin: ...]` marker.
-//    - Edit-supersedes-Read is intentionally NOT applied: edits are partial,
-//      old read output is still valid for unaffected regions.
-//    - Always keeps the MOST RECENT read per file.
-//
-// 2. Duplicate-call dedup (lossless):
-//    - If the same tool is called with identical args AND produces byte-
-//      identical output on two or more turns, older instances are collapsed
-//      to a compact marker pointing at the latest occurrence. Model has
-//      full access to the latest copy; older ones are semantically
-//      redundant by definition (same args, same output).
-//    - Applied to non-structured tools only: read/write/edit are already
-//      handled by pass 1; task/todowrite/question/call_omo_agent/patch are
-//      always skipped.
-//
-// 3. Size-based trim:
-//    - Preserve the LAST N tool outputs intact (recent work matters).
-//    - Only touch `completed` tool parts; never touch pending/running/error.
-//    - Skip structured-output tools (same skip list as pass 2).
-//    - For eligible older tool outputs over the threshold, keep HEAD + TAIL
-//      bytes and replace the middle with a compact marker.
-//
-// Cache safety: deterministic. Defensive: replaces `state` with a shallow
-// clone instead of in-place property mutation, so the source objects (which
-// may be live session references) are left untouched.
-
 const PRESERVE_RECENT = Number(process.env.OPENCODE_CTX_MSGS_KEEP ?? "3")
 const MAX_BYTES = Number(process.env.OPENCODE_CTX_MSGS_CAP ?? "600")
 const HEAD_BYTES = Number(process.env.OPENCODE_CTX_MSGS_HEAD ?? "300")
@@ -44,6 +5,10 @@ const TAIL_BYTES = Number(process.env.OPENCODE_CTX_MSGS_TAIL ?? "150")
 const SUPERSEDE_ENABLED = process.env.OPENCODE_CTX_SUPERSEDE !== "0"
 const DEDUP_ENABLED = process.env.OPENCODE_CTX_DEDUP !== "0"
 const DEDUP_MIN_BYTES = Number(process.env.OPENCODE_CTX_DEDUP_MIN ?? "200")
+const REASONING_ENABLED = process.env.OPENCODE_CTX_REASONING === "1"
+const REASONING_KEEP = Number(process.env.OPENCODE_CTX_REASONING_KEEP ?? "2")
+const FILES_ENABLED = process.env.OPENCODE_CTX_FILES === "1"
+const FILES_KEEP = Number(process.env.OPENCODE_CTX_FILES_KEEP ?? "2")
 
 const SKIP_TOOLS = new Set(["task", "call_omo_agent", "patch", "todowrite", "question"])
 const WRITE_TOOLS = new Set(["write"])
@@ -59,33 +24,55 @@ const DEDUP_SKIP_TOOLS = new Set([
   "multiedit",
 ])
 
+type LoosePart = Record<string, unknown>
 type LooseMsg = {
   info?: { role?: string }
-  parts: Array<Record<string, unknown>>
+  parts: LoosePart[]
 }
 
 type PartRef = { msg: LooseMsg; partIdx: number; order: number }
 
-function getToolName(part: Record<string, unknown>): string {
+type ToolState = {
+  status?: string
+  output?: string
+  input?: unknown
+}
+
+type ToolPart = LoosePart & {
+  state?: ToolState
+}
+
+type ReasoningPart = LoosePart & {
+  type: "reasoning"
+  text: string
+}
+
+type FilePart = LoosePart & {
+  type: "file"
+  mime?: unknown
+  filename?: unknown
+  url?: unknown
+  source?: unknown
+}
+
+function getToolName(part: LoosePart): string {
   return typeof part.tool === "string" ? part.tool : ""
 }
 
-function getFilePath(part: Record<string, unknown>): string | undefined {
+function getFilePath(part: LoosePart): string | undefined {
   const state = part.state as { input?: { filePath?: unknown } } | undefined
-  const fp = state?.input?.filePath
-  return typeof fp === "string" ? fp : undefined
+  const filePath = state?.input?.filePath
+  if (typeof filePath === "string") return filePath
+  return undefined
 }
 
-function supersedeRead(msg: LooseMsg, partIdx: number, marker: string): number {
-  const part = msg.parts[partIdx] as {
-    state: { status: string; output: string; [k: string]: unknown }
-    [k: string]: unknown
-  }
-  const before = part.state.output.length
-  const newState = { ...part.state, output: marker }
-  const newPart = { ...part, state: newState }
-  msg.parts[partIdx] = newPart
-  return before - marker.length
+function replaceToolOutput(msg: LooseMsg, partIdx: number, marker: string): number {
+  const part = msg.parts[partIdx] as ToolPart
+  const state = part.state
+  const output = typeof state?.output === "string" ? state.output : ""
+  const nextState = { ...state, output: marker }
+  msg.parts[partIdx] = { ...part, state: nextState }
+  return output.length - marker.length
 }
 
 function collapseSupersededReads(messages: LooseMsg[]): { saved: number; collapsed: number } {
@@ -95,11 +82,11 @@ function collapseSupersededReads(messages: LooseMsg[]): { saved: number; collaps
 
   for (const msg of messages) {
     if (!msg?.parts) continue
-    for (let p = 0; p < msg.parts.length; p++) {
-      const part = msg.parts[p]
+    for (let partIdx = 0; partIdx < msg.parts.length; partIdx += 1) {
+      const part = msg.parts[partIdx]
       if (part?.type !== "tool") continue
       const tool = getToolName(part)
-      const state = part.state as { status?: string; output?: string } | undefined
+      const state = (part as ToolPart).state
       if (state?.status !== "completed") continue
       const filePath = getFilePath(part)
       if (!filePath) continue
@@ -108,13 +95,11 @@ function collapseSupersededReads(messages: LooseMsg[]): { saved: number; collaps
           order += 1
           continue
         }
-        const list = readsByPath.get(filePath) ?? []
-        list.push({ msg, partIdx: p, order })
-        readsByPath.set(filePath, list)
+        const refs = readsByPath.get(filePath) ?? []
+        refs.push({ msg, partIdx, order })
+        readsByPath.set(filePath, refs)
       }
-      if (WRITE_TOOLS.has(tool)) {
-        if (!firstWriteByPath.has(filePath)) firstWriteByPath.set(filePath, order)
-      }
+      if (WRITE_TOOLS.has(tool) && !firstWriteByPath.has(filePath)) firstWriteByPath.set(filePath, order)
       order += 1
     }
   }
@@ -122,18 +107,17 @@ function collapseSupersededReads(messages: LooseMsg[]): { saved: number; collaps
   let saved = 0
   let collapsed = 0
 
-  for (const [filePath, reads] of readsByPath) {
-    if (reads.length === 0) continue
+  for (const [filePath, refs] of readsByPath) {
+    if (refs.length === 0) continue
     const writeOrder = firstWriteByPath.get(filePath)
-    const lastReadOrder = reads[reads.length - 1].order
-    for (const ref of reads) {
-      const isLastRead = ref.order === lastReadOrder
+    const lastReadOrder = refs[refs.length - 1].order
+    for (const ref of refs) {
       const supersededByWrite = writeOrder !== undefined && ref.order < writeOrder
-      const supersededByRead = !isLastRead && reads.some((r) => r.order > ref.order)
+      const supersededByRead = ref.order < lastReadOrder
       if (!supersededByWrite && !supersededByRead) continue
       const reason = supersededByWrite ? "write" : "later read"
       const marker = `[ctx-plugin: read of ${filePath} superseded by ${reason} in a later turn]`
-      saved += supersedeRead(ref.msg, ref.partIdx, marker)
+      saved += replaceToolOutput(ref.msg, ref.partIdx, marker)
       collapsed += 1
     }
   }
@@ -141,8 +125,8 @@ function collapseSupersededReads(messages: LooseMsg[]): { saved: number; collaps
   return { saved, collapsed }
 }
 
-function getArgsJson(part: Record<string, unknown>): string | undefined {
-  const state = part.state as { input?: unknown } | undefined
+function getArgsJson(part: LoosePart): string | undefined {
+  const state = (part as ToolPart).state
   if (!state || state.input === undefined) return undefined
   return JSON.stringify(state.input)
 }
@@ -153,12 +137,12 @@ function collapseDuplicateCalls(messages: LooseMsg[]): { saved: number; collapse
 
   for (const msg of messages) {
     if (!msg?.parts) continue
-    for (let p = 0; p < msg.parts.length; p++) {
-      const part = msg.parts[p]
+    for (let partIdx = 0; partIdx < msg.parts.length; partIdx += 1) {
+      const part = msg.parts[partIdx]
       if (part?.type !== "tool") continue
       const tool = getToolName(part)
       if (DEDUP_SKIP_TOOLS.has(tool)) continue
-      const state = part.state as { status?: string; output?: string } | undefined
+      const state = (part as ToolPart).state
       if (state?.status !== "completed") continue
       if (typeof state.output !== "string") continue
       if (state.output.startsWith("[ctx-plugin:")) {
@@ -171,9 +155,9 @@ function collapseDuplicateCalls(messages: LooseMsg[]): { saved: number; collapse
       }
       const argsJson = getArgsJson(part) ?? ""
       const key = `${tool}||${argsJson}||${state.output}`
-      const list = byKey.get(key) ?? []
-      list.push({ msg, partIdx: p, order })
-      byKey.set(key, list)
+      const refs = byKey.get(key) ?? []
+      refs.push({ msg, partIdx, order })
+      byKey.set(key, refs)
       order += 1
     }
   }
@@ -181,18 +165,120 @@ function collapseDuplicateCalls(messages: LooseMsg[]): { saved: number; collapse
   let saved = 0
   let collapsed = 0
 
-  for (const [, refs] of byKey) {
+  for (const refs of byKey.values()) {
     if (refs.length < 2) continue
     const latest = refs[refs.length - 1]
     for (const ref of refs) {
       if (ref.order === latest.order) continue
       const marker = `[ctx-plugin: identical tool output produced again at turn order ${latest.order}]`
-      saved += supersedeRead(ref.msg, ref.partIdx, marker)
+      saved += replaceToolOutput(ref.msg, ref.partIdx, marker)
       collapsed += 1
     }
   }
 
   return { saved, collapsed }
+}
+
+function hasReasoningPart(msg: LooseMsg): boolean {
+  return msg.parts.some((part) => part.type === "reasoning")
+}
+
+function hasToolPart(msg: LooseMsg): boolean {
+  return msg.parts.some((part) => part.type === "tool")
+}
+
+function textPart(text: string): LoosePart {
+  return { type: "text", text }
+}
+
+function trimHistoricalReasoning(messages: LooseMsg[]): { trimmed: number; saved: number } {
+  const candidates = messages.filter((msg) => msg.info?.role === "assistant" && hasReasoningPart(msg) && !hasToolPart(msg))
+  const cutoff = Math.max(0, candidates.length - REASONING_KEEP)
+  let trimmed = 0
+  let saved = 0
+
+  for (let index = 0; index < cutoff; index += 1) {
+    const msg = candidates[index]
+    const reasoningParts = msg.parts.filter((part): part is ReasoningPart => part.type === "reasoning" && typeof part.text === "string")
+    if (reasoningParts.length === 0) continue
+    const before = reasoningParts.reduce((sum, part) => sum + part.text.length, 0)
+    const nonReasoning = msg.parts.filter((part) => part.type !== "reasoning")
+    trimmed += reasoningParts.length
+    if (nonReasoning.length === 0) {
+      msg.parts = []
+      saved += before
+      continue
+    }
+    msg.parts = nonReasoning
+    saved += before
+  }
+
+  return { trimmed, saved }
+}
+
+function filePartBytes(part: FilePart): number {
+  const mime = typeof part.mime === "string" ? part.mime : ""
+  const filename = typeof part.filename === "string" ? part.filename : ""
+  const url = typeof part.url === "string" ? part.url : ""
+  const source = part.source as
+    | {
+        path?: unknown
+        uri?: unknown
+        name?: unknown
+        clientName?: unknown
+        text?: { value?: unknown }
+      }
+    | undefined
+  const textValue = typeof source?.text?.value === "string" ? source.text.value : ""
+  const path = typeof source?.path === "string" ? source.path : ""
+  const uri = typeof source?.uri === "string" ? source.uri : ""
+  const name = typeof source?.name === "string" ? source.name : ""
+  const clientName = typeof source?.clientName === "string" ? source.clientName : ""
+  return mime.length + filename.length + url.length + textValue.length + path.length + uri.length + name.length + clientName.length
+}
+
+function fileMarker(part: FilePart): string {
+  const mime = typeof part.mime === "string" ? part.mime : "application/octet-stream"
+  const filename = typeof part.filename === "string" ? part.filename : "file"
+  return `[ctx-plugin: older attachment omitted (${mime} ${filename})]`
+}
+
+function trimHistoricalFiles(messages: LooseMsg[]): { trimmed: number; saved: number } {
+  const refs: Array<{ msg: LooseMsg; partIdx: number }> = []
+
+  for (const msg of messages) {
+    if (!msg?.parts) continue
+    for (let partIdx = 0; partIdx < msg.parts.length; partIdx += 1) {
+      if (msg.parts[partIdx]?.type !== "file") continue
+      refs.push({ msg, partIdx })
+    }
+  }
+
+  const cutoff = Math.max(0, refs.length - FILES_KEEP)
+  let trimmed = 0
+  let saved = 0
+
+  for (let index = 0; index < cutoff; index += 1) {
+    const ref = refs[index]
+    const part = ref.msg.parts[ref.partIdx] as FilePart
+    const marker = fileMarker(part)
+    ref.msg.parts[ref.partIdx] = textPart(marker)
+    trimmed += 1
+    saved += Math.max(0, filePartBytes(part) - marker.length)
+  }
+
+  return { trimmed, saved }
+}
+
+function pruneEmptyMessages(messages: LooseMsg[]): number {
+  let pruned = 0
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const msg = messages[index]
+    if (msg?.parts?.length) continue
+    messages.splice(index, 1)
+    pruned += 1
+  }
+  return pruned
 }
 
 export function trimMessageHistory(messages: LooseMsg[]): {
@@ -203,36 +289,58 @@ export function trimMessageHistory(messages: LooseMsg[]): {
   supersedeSaved: number
   deduped: number
   dedupSaved: number
+  reasoningTrimmed: number
+  reasoningSaved: number
+  filesTrimmed: number
+  filesSaved: number
+  emptyMessagesPruned: number
 } {
   let supersededCount = 0
   let supersedeSaved = 0
   if (SUPERSEDE_ENABLED) {
-    const r = collapseSupersededReads(messages)
-    supersededCount = r.collapsed
-    supersedeSaved = r.saved
+    const result = collapseSupersededReads(messages)
+    supersededCount = result.collapsed
+    supersedeSaved = result.saved
   }
 
   let dedupedCount = 0
   let dedupSaved = 0
   if (DEDUP_ENABLED) {
-    const r = collapseDuplicateCalls(messages)
-    dedupedCount = r.collapsed
-    dedupSaved = r.saved
+    const result = collapseDuplicateCalls(messages)
+    dedupedCount = result.collapsed
+    dedupSaved = result.saved
   }
 
+  let reasoningTrimmed = 0
+  let reasoningSaved = 0
+  if (REASONING_ENABLED) {
+    const result = trimHistoricalReasoning(messages)
+    reasoningTrimmed = result.trimmed
+    reasoningSaved = result.saved
+  }
+
+  let filesTrimmed = 0
+  let filesSaved = 0
+  if (FILES_ENABLED) {
+    const result = trimHistoricalFiles(messages)
+    filesTrimmed = result.trimmed
+    filesSaved = result.saved
+  }
+
+  const emptyMessagesPruned = pruneEmptyMessages(messages)
   const eligible: Array<{ msg: LooseMsg; partIdx: number }> = []
 
   for (const msg of messages) {
     if (!msg?.parts) continue
-    for (let p = 0; p < msg.parts.length; p++) {
-      const part = msg.parts[p]
+    for (let partIdx = 0; partIdx < msg.parts.length; partIdx += 1) {
+      const part = msg.parts[partIdx]
       if (part?.type !== "tool") continue
       const toolName = getToolName(part)
       if (SKIP_TOOLS.has(toolName)) continue
-      const state = part.state as { status?: string; output?: string } | undefined
+      const state = (part as ToolPart).state
       if (state?.status !== "completed") continue
       if (typeof state.output !== "string") continue
-      eligible.push({ msg, partIdx: p })
+      eligible.push({ msg, partIdx })
     }
   }
 
@@ -241,13 +349,11 @@ export function trimMessageHistory(messages: LooseMsg[]): {
   let after = 0
   let trimmedCount = 0
 
-  for (let i = 0; i < cutoff; i++) {
-    const { msg, partIdx } = eligible[i]
-    const part = msg.parts[partIdx] as {
-      state: { status: string; output: string; [k: string]: unknown }
-      [k: string]: unknown
-    }
-    const original = part.state.output
+  for (let index = 0; index < cutoff; index += 1) {
+    const { msg, partIdx } = eligible[index]
+    const part = msg.parts[partIdx] as ToolPart
+    const state = part.state
+    const original = typeof state?.output === "string" ? state.output : ""
     before += original.length
     if (original.length <= MAX_BYTES) {
       after += original.length
@@ -255,10 +361,13 @@ export function trimMessageHistory(messages: LooseMsg[]): {
     }
     const head = original.slice(0, HEAD_BYTES)
     const tail = original.slice(-TAIL_BYTES)
-    const compressed = `${head}\n\n[... ${original.length - HEAD_BYTES - TAIL_BYTES}B trimmed by ctx-plugin (stale tool output) ...]\n\n${tail}`
-    const newState = { ...part.state, output: compressed }
-    const newPart = { ...part, state: newState }
-    msg.parts[partIdx] = newPart
+    const compressed = `${head}
+
+[... ${original.length - HEAD_BYTES - TAIL_BYTES}B trimmed by ctx-plugin (stale tool output) ...]
+
+${tail}`
+    const nextState = { ...state, output: compressed }
+    msg.parts[partIdx] = { ...part, state: nextState }
     after += compressed.length
     trimmedCount += 1
   }
@@ -271,6 +380,11 @@ export function trimMessageHistory(messages: LooseMsg[]): {
     supersedeSaved,
     deduped: dedupedCount,
     dedupSaved,
+    reasoningTrimmed,
+    reasoningSaved,
+    filesTrimmed,
+    filesSaved,
+    emptyMessagesPruned,
   }
 }
 

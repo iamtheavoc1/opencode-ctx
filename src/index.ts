@@ -53,13 +53,17 @@
 //   OPENCODE_CTX_OMOA=0               skip oh-my-openagent prompt compressor
 //   OPENCODE_CTX_COMPACT=0            skip compaction prompt replacement
 //   OPENCODE_CTX_MSGS=0               skip message-history tool-output trim
-//   OPENCODE_CTX_MSGS_KEEP=N          preserve last N tool outputs (default 5)
-//   OPENCODE_CTX_MSGS_CAP=N           byte threshold for trimming (default 1000)
-//   OPENCODE_CTX_MSGS_HEAD=N          head bytes kept on trim (default 500)
-//   OPENCODE_CTX_MSGS_TAIL=N          tail bytes kept on trim (default 250)
+//   OPENCODE_CTX_MSGS_KEEP=N          preserve last N tool outputs (default 3)
+//   OPENCODE_CTX_MSGS_CAP=N           byte threshold for trimming (default 600)
+//   OPENCODE_CTX_MSGS_HEAD=N          head bytes kept on trim (default 300)
+//   OPENCODE_CTX_MSGS_TAIL=N          tail bytes kept on trim (default 150)
 //   OPENCODE_CTX_SUPERSEDE=0          skip superseded-read collapse pass
 //   OPENCODE_CTX_DEDUP=0              skip duplicate tool-call collapse
 //   OPENCODE_CTX_DEDUP_MIN=N          min output bytes to consider for dedup (default 200)
+//   OPENCODE_CTX_REASONING=1          experimental: trim historical reasoning on plain-chat turns only
+//   OPENCODE_CTX_REASONING_KEEP=N     keep last N assistant reasoning turns intact (default 2)
+//   OPENCODE_CTX_FILES=1              experimental: trim historical file parts to markers
+//   OPENCODE_CTX_FILES_KEEP=N         keep last N file parts intact (default 2)
 //   OPENCODE_CTX_CLEAN=0              skip tool-output ANSI/progress-bar clean
 //   OPENCODE_CTX_TTL=0                skip Anthropic cache TTL upgrade
 //   OPENCODE_CTX_TTL_VALUE=1h|5m      TTL target (default 1h)
@@ -183,6 +187,15 @@ export const ContextPlugin: Plugin = async () => {
         }
         if (result.deduped > 0) {
           log(`messages.transform: deduped ${result.deduped} identical tool outputs, saved ${result.dedupSaved}B`)
+        }
+        if (result.reasoningTrimmed > 0) {
+          log(`messages.transform: trimmed ${result.reasoningTrimmed} historical reasoning parts, saved ${result.reasoningSaved}B`)
+        }
+        if (result.filesTrimmed > 0) {
+          log(`messages.transform: trimmed ${result.filesTrimmed} old attachments, saved ${result.filesSaved}B`)
+        }
+        if (result.emptyMessagesPruned > 0) {
+          log(`messages.transform: pruned ${result.emptyMessagesPruned} empty historical messages after trim`)
         }
         if (result.trimmed > 0) {
           log(`messages.transform: ${result.before}B -> ${result.after}B across ${result.trimmed} old tool outputs`)
