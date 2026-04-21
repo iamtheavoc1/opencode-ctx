@@ -4,13 +4,14 @@ Aggressive context compression plugin for [opencode](https://opencode.ai). Cuts 
 
 ## What it does
 
-Six independent, cache-deterministic transforms. Every transform is a pure function of its input, so Anthropic's prefix cache still hits on subsequent turns.
+Seven independent, cache-deterministic transforms. Every transform is a pure function of its input, so Anthropic's prefix cache still hits on subsequent turns.
 
 | Hook | Target | Typical saving |
 |---|---|---|
 | `tool.definition` | Compresses 22 opencode + oh-my-openagent tool descriptions | ~13KB per request |
 | `experimental.chat.system.transform` | Replaces opencode's `anthropic.txt` and oh-my-openagent's Sisyphus prompt with equivalent compressed versions; dedupes the env/skills tail | ~14KB per request |
-| `experimental.chat.messages.transform` | Three passes: (a) lossless superseded-read collapse — replaces reads of files that were later re-read or overwritten; (b) lossless duplicate-call dedup — collapses older identical (tool, args, output) triples to a pointer; (c) size-based trim of remaining stale tool outputs; preserves the last N intact | scales with session length, ~13K+ tokens/turn on long sessions |
+| `experimental.chat.messages.transform` (trim) | Three passes: (a) lossless superseded-read collapse — replaces reads of files that were later re-read or overwritten; (b) lossless duplicate-call dedup — collapses older identical (tool, args, output) triples to a pointer; (c) size-based trim of remaining stale tool outputs; preserves the last N intact | scales with session length, ~13K+ tokens/turn on long sessions |
+| `experimental.chat.messages.transform` (cache-ttl) | Upgrades the most-recent assistant-turn Anthropic cache breakpoint from the default 5m TTL to 1h by injecting part-level providerMetadata. Safe under the 4-breakpoint cap (skips tool-call assistant turns that map to split ModelMessages). Covers 1 of 4 breakpoints — the largest cached prefix | survives 5m–1h idle gaps between turns; +0.75x write cost, 10x read savings across the gap |
 | `tool.execute.after` | Lossless strip of ANSI escapes, progress-bar carriage returns, trailing whitespace, and blank-line runs from every tool output before it persists in the transcript | -30% avg on noisy outputs, -70%+ on progress-bar heavy commands; compounds every turn |
 | `experimental.session.compacting` | Supplies a denser compaction prompt for signal-rich summaries | on compaction events |
 | Caveman output mode (opt-in) | Optional system prompt append that constrains model output style | -62% on output tokens |
@@ -67,6 +68,8 @@ All env-var toggles. Default is plugin on, caveman off.
 | `OPENCODE_CTX_DEDUP=0` | on | Skip lossless duplicate tool-call dedup |
 | `OPENCODE_CTX_DEDUP_MIN=N` | 200 | Min output bytes to consider for dedup |
 | `OPENCODE_CTX_CLEAN=0` | on | Skip lossless tool-output cleaner |
+| `OPENCODE_CTX_TTL=0` | on | Skip Anthropic cache TTL upgrade (1h) |
+| `OPENCODE_CTX_TTL_VALUE=1h\|5m` | `1h` | Cache TTL target for the upgraded breakpoint |
 | `OPENCODE_CTX_CAVEMAN=lite\|full\|ultra` | off | Opt-in caveman output style |
 | `OPENCODE_CTX_DEBUG=1` | off | Log decisions to stderr |
 | `OPENCODE_CTX_DUMP=<path>` | off | Dump `system[0]` to file on first fire (for debugging) |
@@ -103,11 +106,24 @@ src/
   tool-overrides.ts     # 22 tool description overrides
   omoa-trim.ts          # oh-my-openagent Sisyphus compressor + tail dedupe
   messages-trim.ts      # Message history tool-output trim
+  cache-ttl.ts          # Anthropic 1h-TTL cache breakpoint upgrade
   tool-output-clean.ts  # Lossless ANSI/progress-bar cleaner
   system-trim.ts        # opencode anthropic.txt compressor
   compaction-prompt.ts  # Denser compaction prompt
   caveman-prompt.ts     # Opt-in output style compressor
 ```
+
+## Cache TTL upgrade (v0.4+)
+
+opencode's `provider/transform.ts` applies `{ type: "ephemeral" }` at message level to the first 2 system messages and the last 2 non-system messages — producing 4 Anthropic cache breakpoints per request, each with the default 5-minute TTL. Interactive sessions routinely idle >5m between turns (user reviews output, thinks, steps away), so the cache expires and every turn pays a cache-miss write cost.
+
+Anthropic's 1-hour TTL (`{ type: "ephemeral", ttl: "1h" }`) costs 2x base on write (vs 1.25x for 5m) but enables cache hits across gaps up to 60 minutes. Net-positive for any session with N≥2 turns separated by 5m–1h gaps.
+
+**Plugin scope: opencode exposes no hook to register AI SDK middleware or mutate message-level `providerOptions`.** The only available channel is part-level `metadata` on assistant text/reasoning parts, which propagates through `message-v2.ts` → `UIMessage.providerMetadata` → `ModelMessage.providerOptions`. Anthropic's provider reads part-level `cacheControl` before the message-level fallback, so part-level `{ ttl: "1h" }` wins over opencode's message-level `{ type: "ephemeral" }`.
+
+**Breakpoint-overflow safety:** Anthropic caps active breakpoints at 4 per request; opencode consumes all 4. Injecting on a message outside the "last 2 non-system" window creates a 5th breakpoint and returns HTTP 400. `convertToModelMessages` splits opencode assistant messages containing ANY completed tool part into TWO ModelMessages (assistant + tool), which pushes the assistant out of the cache window. The plugin therefore **only injects when the target assistant message has no completed tool parts**, guaranteeing a 1:1 mapping that lands inside the window.
+
+**Coverage:** upgrades AT MOST 1 of the 4 breakpoints — the most recent one, which represents the largest cached prefix and the highest per-turn read savings. The other 3 breakpoints (system[0], system[1], and the tool/user in the last window) remain at 5m TTL; reaching them would require an upstream patch to `provider/transform.ts`.
 
 ## License
 

@@ -38,6 +38,15 @@
 //                               structured tools (task, todowrite, question,
 //                               call_omo_agent, skill, patch) are skipped.
 //
+//   6. cache-ttl (layered on the same messages.transform hook as #4) upgrades
+//      the most-recent assistant-turn Anthropic cache breakpoint from the
+//      default 5m TTL to 1h by injecting part-level providerMetadata. Safe
+//      under the 4-breakpoint limit: skips assistant messages containing
+//      completed tool parts (those would map to a split ModelMessage pair
+//      outside the last-2 cache window). Upgrades 1 of 4 breakpoints - the
+//      largest cached prefix, highest-ROI one. See src/cache-ttl.ts for the
+//      full safety analysis.
+//
 // Kill switches:
 //   OPENCODE_CTX_PLUGIN=0             disable the whole plugin
 //   OPENCODE_CTX_TRIM=0               skip tool description + system prompt trim
@@ -52,6 +61,8 @@
 //   OPENCODE_CTX_DEDUP=0              skip duplicate tool-call collapse
 //   OPENCODE_CTX_DEDUP_MIN=N          min output bytes to consider for dedup (default 200)
 //   OPENCODE_CTX_CLEAN=0              skip tool-output ANSI/progress-bar clean
+//   OPENCODE_CTX_TTL=0                skip Anthropic cache TTL upgrade
+//   OPENCODE_CTX_TTL_VALUE=1h|5m      TTL target (default 1h)
 //   OPENCODE_CTX_CAVEMAN=lite|full|ultra
 //                                     opt-in caveman output style (default off)
 //   OPENCODE_CTX_DEBUG=1              log decisions to stderr
@@ -75,6 +86,7 @@ import { buildCavemanPrompt, parseCavemanLevel } from "./caveman-prompt"
 import { CUSTOM_COMPACTION_PROMPT } from "./compaction-prompt"
 import { trimMessageHistory } from "./messages-trim"
 import { cleanToolOutput } from "./tool-output-clean"
+import { applyCacheTtl } from "./cache-ttl"
 
 const DISABLED = process.env.OPENCODE_CTX_PLUGIN === "0"
 const TRIM_ENABLED = process.env.OPENCODE_CTX_TRIM !== "0"
@@ -82,6 +94,7 @@ const OMOA_ENABLED = process.env.OPENCODE_CTX_OMOA !== "0"
 const COMPACT_ENABLED = process.env.OPENCODE_CTX_COMPACT !== "0"
 const MSGS_ENABLED = process.env.OPENCODE_CTX_MSGS !== "0"
 const CLEAN_ENABLED = process.env.OPENCODE_CTX_CLEAN !== "0"
+const TTL_ENABLED = process.env.OPENCODE_CTX_TTL !== "0"
 const CAVEMAN_LEVEL = parseCavemanLevel(process.env.OPENCODE_CTX_CAVEMAN)
 const DEBUG = process.env.OPENCODE_CTX_DEBUG === "1"
 
@@ -105,9 +118,9 @@ export const ContextPlugin: Plugin = async () => {
   log(
     `active: trim=${TRIM_ENABLED ? "on" : "off"} omoa=${OMOA_ENABLED ? "on" : "off"} compact=${
       COMPACT_ENABLED ? "on" : "off"
-    } msgs=${MSGS_ENABLED ? "on" : "off"} clean=${CLEAN_ENABLED ? "on" : "off"} caveman=${
-      CAVEMAN_LEVEL ?? "off"
-    } overrides=${Object.keys(TOOL_DESCRIPTION_OVERRIDES).length}`,
+    } msgs=${MSGS_ENABLED ? "on" : "off"} clean=${CLEAN_ENABLED ? "on" : "off"} ttl=${
+      TTL_ENABLED ? "on" : "off"
+    } caveman=${CAVEMAN_LEVEL ?? "off"} overrides=${Object.keys(TOOL_DESCRIPTION_OVERRIDES).length}`,
   )
 
   const hooks: ReturnType<Plugin> extends Promise<infer H> ? H : never = {}
@@ -160,18 +173,26 @@ export const ContextPlugin: Plugin = async () => {
     }
   }
 
-  if (MSGS_ENABLED) {
+  if (MSGS_ENABLED || TTL_ENABLED) {
     hooks["experimental.chat.messages.transform"] = async (_input, output) => {
       if (!output.messages || output.messages.length === 0) return
-      const result = trimMessageHistory(output.messages as unknown as Parameters<typeof trimMessageHistory>[0])
-      if (result.superseded > 0) {
-        log(`messages.transform: collapsed ${result.superseded} superseded reads, saved ${result.supersedeSaved}B`)
+      if (MSGS_ENABLED) {
+        const result = trimMessageHistory(output.messages as unknown as Parameters<typeof trimMessageHistory>[0])
+        if (result.superseded > 0) {
+          log(`messages.transform: collapsed ${result.superseded} superseded reads, saved ${result.supersedeSaved}B`)
+        }
+        if (result.deduped > 0) {
+          log(`messages.transform: deduped ${result.deduped} identical tool outputs, saved ${result.dedupSaved}B`)
+        }
+        if (result.trimmed > 0) {
+          log(`messages.transform: ${result.before}B -> ${result.after}B across ${result.trimmed} old tool outputs`)
+        }
       }
-      if (result.deduped > 0) {
-        log(`messages.transform: deduped ${result.deduped} identical tool outputs, saved ${result.dedupSaved}B`)
-      }
-      if (result.trimmed > 0) {
-        log(`messages.transform: ${result.before}B -> ${result.after}B across ${result.trimmed} old tool outputs`)
+      if (TTL_ENABLED) {
+        const ttlResult = applyCacheTtl(output.messages as unknown as Parameters<typeof applyCacheTtl>[0])
+        if (ttlResult.applied) {
+          log(`messages.transform ttl: upgraded last-assistant breakpoint to ${ttlResult.ttl}`)
+        }
       }
     }
   }

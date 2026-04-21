@@ -1,7 +1,7 @@
 {
   "name": "opencode-ctx",
-  "version": "0.3.0",
-  "description": "Aggressive context compression plugin for opencode. Cuts Anthropic token usage ~40% on fresh sessions and ~52% on long sessions while preserving every behavioral rule and prefix-cache determinism.",
+  "version": "0.4.0",
+  "description": "Aggressive context compression plugin for opencode. Cuts Anthropic token usage ~40% on fresh sessions and ~52% on long sessions while preserving every behavioral rule and prefix-cache determinism. v0.4 adds plugin-scope Anthropic 1h-TTL cache upgrade on the most-recent assistant breakpoint.",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {
