@@ -122,7 +122,7 @@ So this README does **not** claim OpenAI savings numbers yet. `opencode auth lis
 
 **Not in v0.4.0 today**, because v0.4.0 is not stripping historical reasoning parts yet. The measured 38-40.7% savings in this document came from system-prompt compression, tool-definition compression, tool-output cleaning, tool-history trimming, and cache behavior.
 
-For the planned reasoning trim in v0.5.0, the goal is: keep reasoning visible in the local UI/session DB, but stop re-sending old reasoning blocks back into the provider on later turns. Structurally that looks safe from the audit already done, but **quality is not claimed yet** until it is benchmarked separately.
+Experimental reasoning trim now exists behind `OPENCODE_CTX_REASONING=1`, but it is **not** claimed as a proven live token win yet. In the current Anthropic `opencode run` path we tested, the benchmark observed **zero reasoning parts and zero reasoning tokens** (`reasoning_supported=false`), so we cannot honestly measure provider-side savings there. The feature is therefore opt-in only, skips assistant turns that contain tool parts, and should be treated as experimental until a real reasoning-emitting provider/model path is verified.
 
 ### Context-window scaling
 
@@ -197,6 +197,19 @@ The current v0.4.0 numbers only prove **token savings**, not that every future t
 
 Practical rule: if the final answer, tool usage, and follow-up recall stay the same, then removing old prompt fat is helping cost/context without hurting quality.
 
+### Experimental reasoning-trim status
+
+Latest quality harness result for the experimental branch:
+
+- `total_rows=84`
+- `matches=80`
+- `mismatches=4`
+- `reasoning_token_rows=0`
+- `reasoning_observed_rows=0`
+- `reasoning_supported=false`
+
+Interpretation: visible-behavior parity looks acceptable on the current suite, with the candidate still matching or beating baseline on every exercised suite, but the tested Anthropic run path did **not** emit real reasoning parts. That means the harness can currently prove "not obviously worse on these prompts", but it cannot prove real provider-side reasoning-token savings.
+
 ### Summary
 
 | Benchmark | OFF | ON | Savings |
@@ -251,6 +264,10 @@ All env-var toggles. Default is plugin on, caveman off.
 | `OPENCODE_CTX_SUPERSEDE=0` | on | Skip lossless superseded-read collapse |
 | `OPENCODE_CTX_DEDUP=0` | on | Skip lossless duplicate tool-call dedup |
 | `OPENCODE_CTX_DEDUP_MIN=N` | 200 | Min output bytes to consider for dedup |
+| `OPENCODE_CTX_REASONING=1` | off | Experimental: trim historical reasoning on plain-chat turns only |
+| `OPENCODE_CTX_REASONING_KEEP=N` | 2 | Experimental: keep last N assistant reasoning turns intact |
+| `OPENCODE_CTX_FILES=1` | off | Experimental: replace older file parts with compact markers |
+| `OPENCODE_CTX_FILES_KEEP=N` | 2 | Experimental: keep last N file parts intact |
 | `OPENCODE_CTX_CLEAN=0` | on | Skip lossless tool-output cleaner |
 | `OPENCODE_CTX_TTL=0` | on | Skip Anthropic cache TTL upgrade (1h) |
 | `OPENCODE_CTX_TTL_VALUE=1h\|5m` | `1h` | Cache TTL target for the upgraded breakpoint |
