@@ -1,0 +1,11 @@
+plugin,turn,session_id,input,output,reasoning,cache_write,cache_read,total,cost
+0,1,ses_250dc7e57ffey2ruup4ZM4dhtf,2,9,0,327,25564,25902,0
+0,2,ses_250dc7e57ffey2ruup4ZM4dhtf,1,13,0,20,25891,25925,0
+0,3,ses_250dc7e57ffey2ruup4ZM4dhtf,0,9,0,25,25911,25945,0
+0,4,ses_250dc7e57ffey2ruup4ZM4dhtf,0,13,0,21,25936,25970,0
+0,5,ses_250dc7e57ffey2ruup4ZM4dhtf,0,22,0,26,25957,26005,0
+1,1,ses_250dc1225ffeT25gPJLn6e1eW9,2,9,0,327,15267,15605,0
+1,2,ses_250dc1225ffeT25gPJLn6e1eW9,1,13,0,20,15594,15628,0
+1,3,ses_250dc1225ffeT25gPJLn6e1eW9,0,5,0,25,15614,15644,0
+1,4,ses_250dc1225ffeT25gPJLn6e1eW9,0,13,0,17,15639,15669,0
+1,5,ses_250dc1225ffeT25gPJLn6e1eW9,0,36,0,26,15656,15718,0
