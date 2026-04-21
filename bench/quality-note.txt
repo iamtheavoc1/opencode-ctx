@@ -1,0 +1,2 @@
+Quality benchmark helper file.
+Expected content for tool-memory suite: BANANA
