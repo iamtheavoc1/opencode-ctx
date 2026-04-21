@@ -18,15 +18,199 @@ Seven independent, cache-deterministic transforms. Every transform is a pure fun
 
 ## Measured savings
 
-Measured with `opencode run --format json "hi"` against a fresh session in the same directory, same model.
+Verified v0.4.0 on 2026-04-21 with live `opencode run --format json` requests. Working artifacts were collected in `/tmp/octx-bench`, and the scripts/result CSVs used for the final write-up were copied into `bench/`. Every benchmark used the same working directory and compared `OPENCODE_CTX_PLUGIN=0` vs `OPENCODE_CTX_PLUGIN=1`.
 
-| Config | Total tokens | Δ vs baseline |
-|---|---:|---:|
-| Baseline (plugin off) | 36,580 | — |
-| With plugin (fresh session) | **21,782** | **-40.5%** |
-| With plugin (typical long-session turn) | ~37K (was ~76K) | **~-52%** |
+**Commands used:**
+- Single-turn: `opencode run --format json --model <model> -- "Reply with exactly: OK"`
+- Multi-turn: `opencode run --session <id> --format json --model <model> -- "<prompt>"`
+- Tool-heavy: same as multi-turn plus `--dangerously-skip-permissions`
 
-Cache determinism verified: `cache.write: 0, cache.read: 21,769` on replay. 100% cache hit across turns.
+**Models actually exercised:**
+- `anthropic/claude-haiku-4-5`
+- `anthropic/claude-opus-4-7`
+- attempted: `openai/gpt-5.4-mini`, `openai/gpt-5.4`
+
+For context-window estimates below, **prompt-side context** means `input + cache.write + cache.read`. Output tokens are excluded from the 200k / 1M projections because they do not consume request context.
+
+### Round 1 — Single-turn, 3 iterations (`anthropic/claude-haiku-4-5`)
+
+Prompt: `"Reply with exactly: OK"`.
+
+| Run | Plugin OFF total | Plugin ON total | Saved |
+|---|---:|---:|---:|
+| 1 (cold cache) | 25,898 | 15,601 | 10,297 (-39.8%) |
+| 2 (warm cache) | 25,898 | 15,601 | 10,297 (-39.8%) |
+| 3 (warm cache) | 25,898 | 15,601 | 10,297 (-39.8%) |
+
+**Consistent -39.8% per request. Zero output variance.**
+
+### Round 2 — Multi-turn 5×, no tools (`anthropic/claude-haiku-4-5`)
+
+Sequential prompts via `--session`. Isolates cache accumulation without tool-output fat.
+
+| Metric | Plugin OFF | Plugin ON | Saved | % |
+|---|---:|---:|---:|---:|
+| Session total | 129,747 | 78,264 | 51,483 | **-39.7%** |
+| Cache read | 129,259 | 77,770 | 51,489 | -39.8% |
+| Cache write | 419 | 415 | 4 | -1.0% |
+
+Per-turn delta stayed flat at ~10.3K tokens — mostly the fixed system-prompt reduction.
+
+### Round 3 — Multi-turn 5×, tool-heavy (`anthropic/claude-haiku-4-5`)
+
+Each turn triggers real tool use (`read`, `grep`, `ls`). This exercises both system-prompt trim and message-history tool-output trim.
+
+| Metric | Plugin OFF | Plugin ON | Saved | % |
+|---|---:|---:|---:|---:|
+| Session total | 142,774 | 88,591 | 54,183 | **-38.0%** |
+| Cache read | 138,775 | 83,325 | 55,450 | -40.0% |
+
+| Turn | Saved |
+|---|---:|
+| 1 | 10,306 |
+| 2 | 10,315 |
+| 3 | 10,841 |
+| 4 | 11,361 |
+| 5 | 11,360 |
+
+Turn 4 captured the tool-output trim firing: plugin ON cache_read dropped by ~2K as stale tool output was elided from history, then rebuilt against a smaller prefix.
+
+### Round 4 — Multi-turn 10×, plain chat (`anthropic/claude-haiku-4-5`)
+
+Ten short memory-style turns. This is the low-growth case: short prompts, no tools, little transcript bloat.
+
+| Metric | Plugin OFF | Plugin ON | Saved | % |
+|---|---:|---:|---:|---:|
+| Prompt-side session total | 259,963 | 157,031 | 102,932 | **-39.6%** |
+| First-turn prompt size | 25,893 | 15,596 | 10,297 | -39.8% |
+| Last-turn prompt size | 26,096 | 15,797 | 10,299 | -39.5% |
+| Prompt growth / turn | 22.6 | 22.3 | 0.3 | -1.3% |
+
+Interpretation: v0.4.0 removes a large fixed chunk every call, but in short plain-chat sessions the turn-to-turn growth was already tiny, so the 200k / 1M reach gain is modest.
+
+### Round 5 — Multi-turn 10×, tool-heavy (`anthropic/claude-haiku-4-5`)
+
+Ten turns with real tool usage and transcript accumulation.
+
+| Metric | Plugin OFF | Plugin ON | Saved | % |
+|---|---:|---:|---:|---:|
+| Prompt-side session total | 334,152 | 198,284 | 135,868 | **-40.7%** |
+| First-turn prompt size | 26,853 | 16,547 | 10,306 | -38.4% |
+| Last-turn prompt size | 41,219 | 23,886 | 17,333 | -42.0% |
+| Prompt growth / turn | 1,596.2 | 815.4 | 780.8 | -48.9% |
+
+Interpretation: once the session accumulates tool output, v0.4.0 nearly halves growth. That is where it meaningfully extends practical context-window reach.
+
+### Round 6 — Cross-model sanity check (`anthropic/claude-opus-4-7`)
+
+Single-turn prompt: `"Reply with exactly: OK"`.
+
+| Metric | Plugin OFF | Plugin ON | Saved | % |
+|---|---:|---:|---:|---:|
+| Prompt-side tokens | 36,572 | 21,781 | 14,791 | **-40.4%** |
+| Output tokens | 6 | 6 | 0 | 0.0% |
+
+### OpenAI status
+
+Actual live requests were attempted against `openai/gpt-5.4-mini` and `openai/gpt-5.4` through opencode's configured OAuth path. Both failed **before inference** with the same provider error:
+
+`401 token_invalidated: Your authentication token has been invalidated. Please try signing in again.`
+
+So this README does **not** claim OpenAI savings numbers yet. `opencode auth list` showed OpenAI OAuth configured, but the live requests still failed at the provider auth layer.
+
+### Does removing old thinking make the model worse?
+
+**Not in v0.4.0 today**, because v0.4.0 is not stripping historical reasoning parts yet. The measured 38-40.7% savings in this document came from system-prompt compression, tool-definition compression, tool-output cleaning, tool-history trimming, and cache behavior.
+
+For the planned reasoning trim in v0.5.0, the goal is: keep reasoning visible in the local UI/session DB, but stop re-sending old reasoning blocks back into the provider on later turns. Structurally that looks safe from the audit already done, but **quality is not claimed yet** until it is benchmarked separately.
+
+### Context-window scaling
+
+Prompt-side growth from the 10-turn scenarios projects to very different horizons depending on session shape:
+
+| Scenario | Turns to 200k context | Turns to 1M context | Capacity gain |
+|---|---:|---:|---:|
+| Plain chat OFF | 7,719 | 43,187 | — |
+| Plain chat ON | 8,257 | 44,078 | +7.0% @ 200k, +2.1% @ 1M |
+| Tool-heavy OFF | 108 | 610 | — |
+| Tool-heavy ON | 225 | 1,206 | +108.3% @ 200k, +97.7% @ 1M |
+
+```text
+Tool-heavy prompt-side context growth
+
+ 220k |                              ██                             ▓▓▓|
+ 207k |                            ██                           ▓▓▓▓   |
+ 194k |··························██·························▓▓▓▓·······|
+ 181k |                        ██                       ▓▓▓▓           |
+ 168k |                      ██                     ▓▓▓▓               |
+ 155k |                    ██                   ▓▓▓▓                   |
+ 142k |                  ██                 ▓▓▓▓                       |
+ 129k |                ██               ▓▓▓▓                           |
+ 116k |              ██             ▓▓▓▓                               |
+ 103k |            ██           ▓▓▓▓                                   |
+  90k |          ██         ▓▓▓▓                                       |
+  77k |       ███       ▓▓▓▓                                           |
+  64k |     ██      ▓▓▓▓                                               |
+  51k |   ██    ▓▓▓▓                                                   |
+  38k | ██  ▓▓▓▓                                                       |
+  25k |█▓▓▓▓                                                           |
+  12k |▓                                                               |
+   0k |                                                                |
+     +----------------------------------------------------------------+
+      0                                                    250 turns
+      OFF=█  ON=▓  200k=·
+```
+
+### Estimated cost at fixed 200k / 1M context
+
+These are **linear token-cost estimates**, not extra live benchmark runs. They assume the same ~40% prompt-side reduction observed above, so a 200k prompt becomes ~120k and a 1M prompt becomes ~600k. Output tokens are ignored here; this table is only about prompt-side spend.
+
+#### Standard input pricing
+
+| Model | 200k without | 200k with plugin | Save | 1M without | 1M with plugin | Save |
+|---|---:|---:|---:|---:|---:|---:|
+| Claude Haiku 4.5 ($1.00 / MTok input) | $0.20 | $0.12 | $0.08 | $1.00 | $0.60 | $0.40 |
+| Claude Opus 4.7 ($5.00 / MTok input) | $1.00 | $0.60 | $0.40 | $5.00 | $3.00 | $2.00 |
+| OpenAI GPT-5.4 ($2.50 / MTok input) | $0.50 | $0.30 | $0.20 | $2.50 | $1.50 | $1.00 |
+| OpenAI GPT-5.4 mini ($0.75 / MTok input) | $0.15 | $0.09 | $0.06 | $0.75 | $0.45 | $0.30 |
+
+#### Cached-input pricing
+
+| Model | 200k without | 200k with plugin | Save | 1M without | 1M with plugin | Save |
+|---|---:|---:|---:|---:|---:|---:|
+| Claude Haiku 4.5 ($0.10 / MTok cached read) | $0.020 | $0.012 | $0.008 | $0.100 | $0.060 | $0.040 |
+| Claude Opus 4.7 ($0.50 / MTok cached read) | $0.100 | $0.060 | $0.040 | $0.500 | $0.300 | $0.200 |
+| OpenAI GPT-5.4 ($0.25 / MTok cached input) | $0.050 | $0.030 | $0.020 | $0.250 | $0.150 | $0.100 |
+| OpenAI GPT-5.4 mini ($0.075 / MTok cached input) | $0.015 | $0.009 | $0.006 | $0.075 | $0.045 | $0.030 |
+
+OpenAI pricing is included because token billing is linear, but **OpenAI runtime savings are still unverified in this repo** until OAuth is fixed and the same live ON/OFF benchmarks can run there too.
+
+### How to tell whether quality is affected
+
+The current v0.4.0 numbers only prove **token savings**, not that every future trim is always quality-neutral. The right way to check quality is:
+
+1. Keep the exact same prompt set and model.
+2. Run plugin OFF and plugin ON on the same sessions.
+3. Compare user-visible answers for correctness, tool choice, omissions, and follow-up consistency.
+4. For long sessions, replay memory/tool-heavy transcripts and compare the final answer, not hidden reasoning verbosity.
+5. For reasoning-trim specifically, benchmark it as a separate release because v0.4.0 does **not** remove old reasoning yet.
+
+Practical rule: if the final answer, tool usage, and follow-up recall stay the same, then removing old prompt fat is helping cost/context without hurting quality.
+
+### Summary
+
+| Benchmark | OFF | ON | Savings |
+|---|---:|---:|---:|
+| Single-turn × 3 (`haiku`) | 77,694 | 46,803 | **-39.8%** |
+| Multi-turn 5× no-tools (`haiku`) | 129,747 | 78,264 | **-39.7%** |
+| Multi-turn 5× tools (`haiku`) | 142,774 | 88,591 | **-38.0%** |
+| Multi-turn 10× plain chat (`haiku`, prompt-side) | 259,963 | 157,031 | **-39.6%** |
+| Multi-turn 10× tools (`haiku`, prompt-side) | 334,152 | 198,284 | **-40.7%** |
+| Single-turn (`opus`) | 36,572 | 21,781 | **-40.4%** |
+
+**Observed range today: 38.0% to 40.7% savings.** The fixed system-prompt cut dominates plain chat. The growth-rate win shows up in tool-heavy sessions, where v0.4.0 roughly doubles practical turns before hitting 200k / 1M ceilings. The next release should target reasoning parts and file parts, because those are the remaining large sources of long-session growth.
+
+Cache determinism stayed intact: plugin ON continued hitting Anthropic prefix cache after the first rewritten turn.
 
 ## Install
 
