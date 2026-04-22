@@ -8,6 +8,21 @@ Stable **v0.5.0** is focused on the part we could prove well: prompt/context com
 > **Best fit:** long coding sessions with lots of tool output.
 > **Important:** this stable release does **not** rely on experimental reasoning/file trimming.
 
+## Full documentation
+
+Long-form reference lives in [`docs/`](./docs/README.md):
+
+- [Getting started](./docs/getting-started.md) — install, verify, 2-minute quickstart
+- [How it works](./docs/how-it-works.md) — every module, in execution order
+- [Configuration](./docs/configuration.md) — every environment variable
+- [Benchmarks](./docs/benchmarks.md) — measured savings + how to reproduce
+- [Quality](./docs/quality.md) — what "no regression" actually means here
+- [Troubleshooting](./docs/troubleshooting.md) — known failure modes and fixes
+- [Architecture](./docs/architecture.md) — hook ordering, provider-shape invariants
+- [Contributing](./docs/contributing.md) — how to add or remove a module safely
+
+The rest of this README is a short summary of the same information.
+
 ---
 
 ## What this plugin is, in beginner terms
