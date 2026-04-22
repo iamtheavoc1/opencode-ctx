@@ -1,6 +1,6 @@
 {
   "name": "opencode-ctx",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Stable context compression plugin for opencode. Proven ~38-41% prompt-side token reduction in live Anthropic benchmarks and ~45-50% in the published OpenAI gpt-5.4-mini benchmark, with tool-heavy sessions roughly doubling usable turns before 200k/1M windows fill.",
   "type": "module",
   "main": "./src/index.ts",
