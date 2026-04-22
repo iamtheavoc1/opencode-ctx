@@ -2,9 +2,9 @@
 
 Shrink opencode's prompt/context before it hits the model.
 
-> **Proven today:** about **38-41% fewer prompt-side tokens** in live Anthropic benchmarks.
+> **Stable today:** about **38-41% fewer prompt-side tokens** in live Anthropic benchmarks.
 > **Best fit:** long sessions with lots of tool output.
-> **Not claimed yet:** real live reasoning-token savings.
+> **Scope:** prompt/tool/history compression only — no risky reasoning tricks required.
 
 ## TL;DR
 
@@ -12,9 +12,9 @@ Shrink opencode's prompt/context before it hits the model.
 |---|---|
 | **Per-request savings** | A trivial Anthropic request dropped from **25,898** tokens to **15,601** (**-39.8%**) |
 | **Long-session savings** | A 10-turn tool-heavy session dropped from **334,152** to **198,284** prompt-side tokens (**-40.7%**) |
-| **Context window reach** | In the tool-heavy projection, **200k** grows from **108** turns to **225** turns; **1M** grows from **610** to **1,206** turns |
-| **Quality** | The proven savings come from prompt/tool/history compression, **not** from experimental reasoning trim |
-| **Experimental features** | Historical reasoning trim and file trim exist, but both are **opt-in only** |
+| **Context window reach** | In the measured tool-heavy projection, **200k** grows from **108** turns to **225** turns; **1M** grows from **610** to **1,206** turns |
+| **What it actually does** | Compresses prompt/tool overhead, stale tool history, duplicate output, and terminal noise |
+| **What it does not rely on** | No experimental reasoning-trim path is required for the proven savings |
 
 ## What the savings mean in plain English
 
@@ -30,26 +30,17 @@ With plugin     ██████████████            15,601
 Saved           ██████████                10,297  (-39.8%)
 ```
 
-The savings are not a tiny micro-optimization. The plugin is mostly removing repeated prompt overhead, redundant tool text, stale old tool output, and terminal junk that does not help the model answer better.
+This is not a tiny micro-optimization. The plugin mainly removes repeated prompt overhead, bloated tool descriptions, stale old tool output, duplicate tool output, and terminal junk that does not help the model answer better.
 
-## What is proven vs experimental
-
-### Proven and on by default
+## What the stable plugin does
 
 | Feature | What it does | Status |
 |---|---|---|
-| Tool description compression | Shrinks opencode + oh-my-openagent tool definitions | **Proven** |
-| System prompt compression | Shrinks the big fixed system prompt | **Proven** |
-| Message-history tool trim | Collapses stale old tool output and duplicate reads/calls | **Proven** |
-| Tool-output cleaning | Removes ANSI noise, progress bars, extra blank lines | **Proven** |
-| Anthropic 1h cache TTL upgrade | Keeps the most valuable cache breakpoint alive longer | **Proven** |
-
-### Experimental and opt-in
-
-| Feature | Toggle | Current status |
-|---|---|---|
-| Historical reasoning trim | `OPENCODE_CTX_REASONING=1` | Quality harness looks okay, but the tested Anthropic run path emitted **no real reasoning parts/tokens**, so this is **not** claimed as a proven live token win |
-| Historical file trim | `OPENCODE_CTX_FILES=1` | Implemented conservatively, but still **experimental** |
+| Tool description compression | Shrinks opencode + oh-my-openagent tool definitions | **Stable** |
+| System prompt compression | Shrinks the big fixed system prompt | **Stable** |
+| Message-history tool trim | Collapses stale old tool output and duplicate reads/calls | **Stable** |
+| Tool-output cleaning | Removes ANSI noise, progress bars, extra blank lines | **Stable** |
+| Anthropic 1h cache TTL upgrade | Keeps the most valuable cache breakpoint alive longer | **Stable** |
 
 ## Proven benchmark summary
 
@@ -62,7 +53,7 @@ These are the easiest numbers to trust and understand.
 | **10-turn tool-heavy session** | 334,152 | 198,284 | **135,868 (-40.7%)** | Old tool output gets trimmed too, so long sessions benefit most |
 | **Opus sanity check (single turn)** | 36,572 | 21,781 | **14,791 (-40.4%)** | The same pattern holds on a stronger Anthropic model |
 
-**Bottom line:** the plugin consistently saves about **2/5 of the prompt/context tokens** in the live Anthropic runs we measured.
+**Bottom line:** the stable plugin consistently saves about **2/5 of the prompt/context tokens** in the live Anthropic runs we measured.
 
 ## Context window impact
 
@@ -99,25 +90,15 @@ The **proven savings** in this repo come from:
 - tool definition compression
 - system prompt compression
 - stale tool-output trimming
+- duplicate output collapse
 - tool-output cleaning
 - Anthropic TTL cache upgrade
 
-They do **not** depend on the experimental reasoning-trim path.
+The stable plugin does **not** depend on historical reasoning trim or historical file trim.
 
-### Experimental reasoning-trim status
+### Cache safety
 
-Latest committed quality harness result:
-
-- `candidate = 42 / 42`
-- `baseline = 38 / 42`
-- `reasoning_supported = false`
-- `reasoning_token_rows = 0`
-- `reasoning_observed_rows = 0`
-
-Interpretation:
-- the current experimental branch is **not obviously worse** on the visible-behavior suite we ran
-- but the tested Anthropic `opencode run` path did **not** emit real reasoning parts/tokens
-- so this repo does **not** claim real live reasoning-token savings yet
+This plugin is designed to preserve deterministic prefixes. If the same prompt/session state produces the same transformed output, Anthropic prompt caching still works — it just caches the smaller transformed prefix instead of the larger original one.
 
 ### OpenAI status
 
@@ -147,7 +128,7 @@ Add to `~/.config/opencode/opencode.json`:
 ```json
 {
   "plugin": [
-    "file:///Users/YOU/.local/share/opencode-ctx/src/index.ts"
+    "file://$HOME/.local/share/opencode-ctx/src/index.ts"
   ]
 }
 ```
@@ -174,7 +155,7 @@ You should see `[ctx-plugin] active: ...` on stderr.
 | `OPENCODE_CTX_CLEAN=0` | on | Skip lossless tool-output cleaner |
 | `OPENCODE_CTX_TTL=0` | on | Skip Anthropic cache TTL upgrade (1h) |
 | `OPENCODE_CTX_TTL_VALUE=1h|5m` | `1h` | Cache TTL target for the upgraded breakpoint |
-| `OPENCODE_CTX_CAVEMAN=lite|full|ultra` | off | Opt-in caveman output style |
+| `OPENCODE_CTX_CAVEMAN=lite|full|ultra` | off | Opt-in terse output style |
 | `OPENCODE_CTX_DEBUG=1` | off | Log decisions to stderr |
 | `OPENCODE_CTX_DUMP=<path>` | off | Dump `system[0]` to file on first fire |
 
@@ -190,15 +171,6 @@ You should see `[ctx-plugin] active: ...` on stderr.
 | `OPENCODE_CTX_DEDUP=0` | on | Skip duplicate tool-call dedup |
 | `OPENCODE_CTX_DEDUP_MIN=N` | 200 | Min output bytes to consider for dedup |
 
-### Experimental toggles
-
-| Var | Default | Effect |
-|---|---|---|
-| `OPENCODE_CTX_REASONING=1` | off | Experimental: trim historical reasoning on plain-chat turns only |
-| `OPENCODE_CTX_REASONING_KEEP=N` | 2 | Experimental: keep last N assistant reasoning turns intact |
-| `OPENCODE_CTX_FILES=1` | off | Experimental: replace older file parts with compact markers |
-| `OPENCODE_CTX_FILES_KEEP=N` | 2 | Experimental: keep last N file parts intact |
-
 If the model seems to lose context on long sessions, bump `OPENCODE_CTX_MSGS_KEEP=5` or disable message-history trimming entirely with `OPENCODE_CTX_MSGS=0`.
 
 ## Bench artifacts
@@ -210,7 +182,7 @@ That folder contains:
 - multi-turn plain-chat benchmark
 - multi-turn tool-heavy benchmark
 - expanded 10-turn scenario benchmark
-- experimental quality harness + result CSV
+- quality/research artifacts from the reasoning-trim investigation
 
 If you want the receipts, that folder is the receipts.
 
@@ -235,14 +207,6 @@ The raw CSVs are in `bench/`.
 </details>
 
 <details>
-<summary><strong>How cache safety works</strong></summary>
-
-Anthropic's prefix cache matches the beginning of input against cached content. If you mutate message N, the prefix up to N-1 still caches and only N onward re-processes. This plugin guarantees determinism — same input produces the same output on every call — so the mutated prefix itself becomes the new stable cache key. First post-install turn is a cache miss (expected); subsequent turns hit the new, smaller cache.
-
-The `messages.transform` hook defensively shallow-clones `state` before rewriting `state.output` to avoid mutating live session DB references.
-</details>
-
-<details>
 <summary><strong>Anthropic TTL upgrade details</strong></summary>
 
 opencode's `provider/transform.ts` applies `{ type: "ephemeral" }` at message level to the first 2 system messages and the last 2 non-system messages — producing 4 Anthropic cache breakpoints per request, each with the default 5-minute TTL.
@@ -258,11 +222,11 @@ src/
   tool-overrides.ts     # Tool description compression
   system-trim.ts        # System prompt compression
   omoa-trim.ts          # oh-my-openagent prompt compression
-  messages-trim.ts      # History trimming, dedup, experimental reasoning/file trim
+  messages-trim.ts      # History trimming, dedup, and stale tool-output compression
   cache-ttl.ts          # Anthropic 1h TTL upgrade
   tool-output-clean.ts  # Lossless ANSI/progress-bar cleaner
   compaction-prompt.ts  # Denser compaction prompt
-  caveman-prompt.ts     # Opt-in output style compressor
+  caveman-prompt.ts     # Opt-in terse output style
 ```
 
 ## License
