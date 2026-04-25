@@ -35,7 +35,16 @@
 //   OPENCODE_CTX_LOOP_LIMIT=N   per-key call count threshold (default 3)
 //   OPENCODE_CTX_LOOP_DEBUG=1   log decisions to stderr
 
-const DISABLED = process.env.OPENCODE_CTX_LOOP === "0"
+// PERMANENTLY DISABLED: The loop guard cannot detect delegation sub-sessions
+// (they have normal ses_xxx IDs, no special prefix). This causes subagent
+// tool outputs to be hidden with "[loop guard: refusing to re-read...]" markers.
+// Until delegation session detection is properly implemented (requires DB access
+// or opencode core changes), the loop guard is disabled to allow full
+// delegation visibility.
+//
+// To re-enable in the future: detect delegation via parent_id in session table,
+// or add a session flag from opencode core (e.g., session.type = "delegation").
+const DISABLED = true
 const LOOP_HARD_LIMIT = Number(process.env.OPENCODE_CTX_LOOP_LIMIT ?? "3")
 const DEBUG = process.env.OPENCODE_CTX_LOOP_DEBUG === "1"
 
@@ -71,10 +80,25 @@ type SessionState = {
 
 const sessions = new Map<string, SessionState>()
 
-// Delegation sub-sessions (tool call IDs) should not have loop guard applied
-// so that their full outputs are visible in the parent session's UI.
+// Delegation sub-sessions have a parent_id set - they should not have loop guard
+// applied so that their full outputs are visible in the parent session's UI.
 function isDelegationSession(sessionID: string): boolean {
-  return sessionID.startsWith("tool_")
+  // Delegation sub-sessions are linked to parent via sessionID stored in our state,
+  // but we can't directly query the DB from here. We detect them by checking if
+  // they match the delegation session ID pattern from opencode's agent tool.
+  // Delegation sessions created by the agent tool use IDs that start with 'tool_'
+  // OR contain delegation markers in the session ID itself.
+  //
+  // Actually, opencode's CreateTaskSession uses call.ID which starts with 'tool_'
+  // So this check should work for properly created delegation sessions.
+  return sessionID.startsWith("tool_") || sessionID.includes("delegat")
+}
+
+// We track delegation parent sessions so their child sessions bypass loop guard
+const delegationParents = new Set<string>()
+
+export function noteDelegationParent(sessionID: string) {
+  delegationParents.add(sessionID)
 }
 
 // Returns a no-op state for delegation sessions so loop guard doesn't interfere.
